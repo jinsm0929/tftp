@@ -1,0 +1,99 @@
+import socket
+import struct
+import os
+
+class TFTPClient:
+    def __init__(self, server_ip, server_port=69, timeout=5):
+        self.server_ip = server_ip
+        self.server_port = server_port
+        self.timeout = timeout
+
+    def send_request(self, request_packet):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(self.timeout)
+            sock.sendto(request_packet, (self.server_ip, self.server_port))
+            try:
+                response, server_addr = sock.recvfrom(516)
+                return response, server_addr
+            except socket.timeout:
+                print("Request timed out. No response from server.")
+                return None, None
+
+    def download(self, filename):
+        # RRQ Packet: Opcode(1) | Filename | 0 | Mode | 0
+        rrq_packet = struct.pack(f"!H{len(filename)+1}s{len('octet')+1}s", 1, filename.encode(), b'octet')
+        response, server_addr = self.send_request(rrq_packet)
+
+        if response is None:
+            return
+
+        with open(filename, 'wb') as f:
+            block_number = 1
+            while True:
+                opcode, recv_block = struct.unpack("!HH", response[:4])
+                if opcode == 3:  # DATA Packet
+                    if recv_block != block_number:
+                        print("Unexpected block number received!")
+                        break
+                    f.write(response[4:])
+                    # Send ACK: Opcode(4) | Block Number
+                    ack_packet = struct.pack("!HH", 4, block_number)
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sock.sendto(ack_packet, server_addr)
+                    sock.close()
+                    if len(response[4:]) < 512:
+                        print(f"File '{filename}' downloaded successfully.")
+                        break
+                    block_number += 1
+                elif opcode == 5:  # Error Packet
+                    print(f"Error: {response[4:].decode()}")
+                    break
+
+    def upload(self, filename):
+        if not os.path.exists(filename):
+            print(f"File '{filename}' does not exist.")
+            return
+
+        # WRQ Packet: Opcode(2) | Filename | 0 | Mode | 0
+        wrq_packet = struct.pack(f"!H{len(filename)+1}s{len('octet')+1}s", 2, filename.encode(), b'octet')
+        response, server_addr = self.send_request(wrq_packet)
+
+        if response is None:
+            return
+
+        with open(filename, 'rb') as f:
+            block_number = 1
+            while True:
+                data = f.read(512)
+                # DATA Packet: Opcode(3) | Block Number | Data
+                data_packet = struct.pack("!HH", 3, block_number) + data
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.sendto(data_packet, server_addr)
+                try:
+                    response, server_addr = sock.recvfrom(516)
+                    opcode, recv_block = struct.unpack("!HH", response[:4])
+                    if opcode == 4 and recv_block == block_number:
+                        print(f"Block {block_number} acknowledged.")
+                        if len(data) < 512:
+                            print(f"File '{filename}' uploaded successfully.")
+                            break
+                        block_number += 1
+                    elif opcode == 5:  # Error Packet
+                        print(f"Error: {response[4:].decode()}")
+                        break
+                except socket.timeout:
+                    print("Timeout waiting for ACK.")
+                    break
+                finally:
+                    sock.close()
+
+# 사용 예시
+if __name__ == "__main__":
+    server_ip = "203.250.133.88"
+    client = TFTPClient(server_ip)
+
+    # 파일 다운로드
+    client.download("example.txt")
+
+    # 파일 업로드
+    client.upload("upload.txt")
